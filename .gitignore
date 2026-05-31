@@ -2,3 +2,15 @@ __pycache__/
 *.pyc
 *.hands.json
 output.mp4
+
+# downloaded model
+hand_landmarker.task
+
+# virtualenv (whether in .venv/ or created in the repo root)
+.venv/
+bin/
+lib/
+lib64/
+include/
+share/
+pyvenv.cfg

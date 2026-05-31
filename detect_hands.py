@@ -3,14 +3,15 @@
 detect_hands.py - Find frames containing hands and write detection metadata.
 
 This is the *detection* half of the pipeline. It scans a leather-stitching (or
-any close-up handcraft) video with MediaPipe Hands and writes a JSON metadata
-file describing which frames contain hands and which contiguous segments should
-be kept or dropped. It does not touch the video itself - feed the metadata to
-cut_video.py to produce the cleaned output with ffmpeg.
+any close-up handcraft) video with MediaPipe's HandLandmarker and writes a JSON
+metadata file describing which frames contain hands and which contiguous
+segments should be kept or dropped. It does not touch the video itself - feed
+the metadata to cut_video.py to produce the cleaned output with ffmpeg.
 
-Detection uses MediaPipe Hands, a purpose-built hand-landmark model, so it keys
-on actual hand structure rather than skin color and won't be fooled by
-warm-toned leather.
+Detection uses the MediaPipe Tasks HandLandmarker model, a purpose-built
+hand-landmark model, so it keys on actual hand structure rather than skin color
+and won't be fooled by warm-toned leather. The model file is downloaded
+automatically on first run.
 
 Usage:
     python detect_hands.py input.mp4
@@ -23,7 +24,7 @@ The output JSON looks like:
       "frame_count": 1234,
       "width": 1920,
       "height": 1080,
-      "detector": "mediapipe",
+      "detector": "mediapipe-hand-landmarker",
       "confidence": 0.5,
       "pad": 3,
       "frames_kept": 800,
@@ -37,30 +38,64 @@ import argparse
 import json
 import os
 import sys
+import urllib.request
 
 import cv2
 import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
+
+
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+    "hand_landmarker/float16/1/hand_landmarker.task"
+)
+MODEL_FILENAME = "hand_landmarker.task"
+
+
+def ensure_model(model_path=None):
+    """Return a path to the hand_landmarker.task model, downloading if needed."""
+    if model_path:
+        if not os.path.exists(model_path):
+            sys.exit(f"error: model file not found: {model_path}")
+        return model_path
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, MODEL_FILENAME)
+    if not os.path.exists(path):
+        print(f"downloading hand landmarker model -> {path}")
+        try:
+            urllib.request.urlretrieve(MODEL_URL, path)
+        except Exception as exc:  # network / permissions
+            sys.exit(f"error: could not download model: {exc}\n"
+                     f"Download it manually from {MODEL_URL} and pass "
+                     f"--model <path>.")
+    return path
 
 
 class HandDetector:
-    """Hand detector backed by MediaPipe Hands."""
+    """Hand detector backed by MediaPipe Tasks HandLandmarker (VIDEO mode)."""
 
-    def __init__(self, confidence=0.5, max_hands=2):
-        self._hands = mp.solutions.hands.Hands(
-            static_image_mode=False,
-            max_num_hands=max_hands,
-            min_detection_confidence=confidence,
+    def __init__(self, confidence=0.5, max_hands=2, model_path=None):
+        path = ensure_model(model_path)
+        options = mp_vision.HandLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=path),
+            running_mode=mp_vision.RunningMode.VIDEO,
+            num_hands=max_hands,
+            min_hand_detection_confidence=confidence,
+            min_hand_presence_confidence=confidence,
             min_tracking_confidence=confidence,
         )
+        self._landmarker = mp_vision.HandLandmarker.create_from_options(options)
 
-    def has_hand(self, frame_bgr):
+    def has_hand(self, frame_bgr, timestamp_ms):
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        rgb.flags.writeable = False  # lets MediaPipe skip a copy
-        result = self._hands.process(rgb)
-        return bool(result.multi_hand_landmarks)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
+        return bool(result.hand_landmarks)
 
     def close(self):
-        self._hands.close()
+        self._landmarker.close()
 
 
 def frames_to_segments(flags):
@@ -95,7 +130,7 @@ def detect(args):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
-    detector = HandDetector(confidence=args.confidence)
+    detector = HandDetector(confidence=args.confidence, model_path=args.model)
 
     flags = []
     idx = 0
@@ -103,7 +138,9 @@ def detect(args):
         ok, frame = cap.read()
         if not ok:
             break
-        flags.append(detector.has_hand(frame))
+        # VIDEO mode wants a monotonically increasing timestamp in ms.
+        timestamp_ms = int(idx * 1000 / fps)
+        flags.append(detector.has_hand(frame, timestamp_ms))
         idx += 1
         if total and idx % 30 == 0:
             print(f"\rscanning {idx}/{total} "
@@ -136,7 +173,7 @@ def detect(args):
         "frame_count": n,
         "width": width,
         "height": height,
-        "detector": "mediapipe",
+        "detector": "mediapipe-hand-landmarker",
         "confidence": args.confidence,
         "pad": args.pad,
         "frames_kept": frames_kept,
@@ -167,6 +204,9 @@ def main():
     p.add_argument("--pad", type=int, default=0,
                    help="also drop N frames on each side of every detection "
                         "(default: 0)")
+    p.add_argument("--model", default=None,
+                   help="path to hand_landmarker.task (default: auto-download "
+                        "next to this script)")
     args = p.parse_args()
     detect(args)
 
