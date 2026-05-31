@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+*.hands.json
+output.mp4
