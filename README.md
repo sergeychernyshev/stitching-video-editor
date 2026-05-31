@@ -55,7 +55,6 @@ python cut_video.py input.hands.json output.mp4
 | -------------- | ---------------------------------------------------------------- |
 | `-o/--output`  | Metadata JSON path (default `<input>.hands.json`)                |
 | `--confidence` | MediaPipe min detection/tracking confidence (default `0.5`)      |
-| `--pad`        | Also drop N frames on each side of every detection (default `0`) |
 | `--model`      | Path to `hand_landmarker.task` (default: auto-download)          |
 
 ### Editing options (`cut_video.py`)
@@ -63,6 +62,7 @@ python cut_video.py input.hands.json output.mp4
 | Flag         | Description                                            |
 | ------------ | ----------------------------------------------------- |
 | `--input`    | Source video (default: the path recorded in metadata) |
+| `--pad`      | Grow (positive) or shrink (negative) each cut-out segment by N frames on each side (default `0`) |
 | `--no-audio` | Drop audio entirely                                   |
 | `--vcodec`   | Video codec (default `libx264`)                       |
 | `--crf`      | x264 quality, lower = better (default `20`)           |
@@ -92,6 +92,25 @@ python cut_video.py input.hands.json output.mp4
 
 `keep_segments` / `drop_segments` are inclusive `[start, end]` frame ranges.
 You can edit these by hand before running `cut_video.py` to fine-tune the cut.
+
+### Tuning the cut-out edges with `--pad`
+
+Hand detection can miss the "semi-frames" where a hand is just entering or
+leaving the shot, so the cut may either leave a few hand frames in or trim too
+much of the natural in/out motion. `--pad` lives on `cut_video.py`, so you can
+re-tune the edges without re-running detection:
+
+```bash
+# Still seeing stray hand frames at the edges? Grow each cut-out segment:
+python cut_video.py input.hands.json output.mp4 --pad 3
+
+# Want to keep more of the hand entering/leaving? Shrink each cut-out segment:
+python cut_video.py input.hands.json output.mp4 --pad -3
+```
+
+Positive values drop more frames around each cut-out (hiding undetected in/out
+frames); negative values keep a frame dropped only if its neighbours within N
+were also dropped, revealing more of the in/out motion.
 
 ## Notes
 

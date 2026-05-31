@@ -15,7 +15,7 @@ automatically on first run.
 
 Usage:
     python detect_hands.py input.mp4
-    python detect_hands.py input.mp4 -o input.hands.json --confidence 0.6 --pad 3
+    python detect_hands.py input.mp4 -o input.hands.json --confidence 0.6
 
 The output JSON looks like:
     {
@@ -26,7 +26,6 @@ The output JSON looks like:
       "height": 1080,
       "detector": "mediapipe-hand-landmarker",
       "confidence": 0.5,
-      "pad": 3,
       "frames_kept": 800,
       "frames_dropped": 434,
       "keep_segments": [[0, 119], [200, 540], ...],   # inclusive frame ranges
@@ -37,6 +36,7 @@ The output JSON looks like:
 import argparse
 import json
 import os
+import ssl
 import sys
 import urllib.request
 
@@ -65,12 +65,43 @@ def ensure_model(model_path=None):
     if not os.path.exists(path):
         print(f"downloading hand landmarker model -> {path}")
         try:
-            urllib.request.urlretrieve(MODEL_URL, path)
+            _download(MODEL_URL, path)
         except Exception as exc:  # network / permissions
             sys.exit(f"error: could not download model: {exc}\n"
                      f"Download it manually from {MODEL_URL} and pass "
                      f"--model <path>.")
     return path
+
+
+def _download(url, path):
+    """Download `url` to `path`, working around macOS missing-CA SSL errors.
+
+    Python on macOS often can't find the system CA bundle, raising
+    CERTIFICATE_VERIFY_FAILED. Try the default context first, then certifi's
+    bundle if installed, then fall back to an unverified context (the model is
+    served from a fixed Google Storage URL, so this is low-risk).
+    """
+    contexts = [None]  # default verified context
+    try:
+        import certifi
+        contexts.append(ssl.create_default_context(cafile=certifi.where()))
+    except ImportError:
+        pass
+    contexts.append(ssl._create_unverified_context())
+
+    last_exc = None
+    for ctx in contexts:
+        try:
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=ctx) if ctx else
+                urllib.request.HTTPSHandler())
+            with opener.open(url) as resp, open(path, "wb") as fh:
+                fh.write(resp.read())
+            return
+        except ssl.SSLError as exc:
+            last_exc = exc
+            continue
+    raise last_exc
 
 
 class HandDetector:
@@ -153,16 +184,6 @@ def detect(args):
     if n == 0:
         sys.exit("error: no frames read from input.")
 
-    # Expand each detection by --pad frames on either side so brief in/out
-    # hand movements don't leave jittery single clean frames.
-    if args.pad > 0:
-        padded = [False] * n
-        for i, f in enumerate(flags):
-            if f:
-                for j in range(max(0, i - args.pad), min(n, i + args.pad + 1)):
-                    padded[j] = True
-        flags = padded
-
     keep_segments, drop_segments = frames_to_segments(flags)
     frames_dropped = sum(1 for f in flags if f)
     frames_kept = n - frames_dropped
@@ -175,7 +196,6 @@ def detect(args):
         "height": height,
         "detector": "mediapipe-hand-landmarker",
         "confidence": args.confidence,
-        "pad": args.pad,
         "frames_kept": frames_kept,
         "frames_dropped": frames_dropped,
         "keep_segments": keep_segments,
@@ -201,9 +221,6 @@ def main():
     p.add_argument("--confidence", type=float, default=0.5,
                    help="MediaPipe min detection/tracking confidence "
                         "(default: 0.5)")
-    p.add_argument("--pad", type=int, default=0,
-                   help="also drop N frames on each side of every detection "
-                        "(default: 0)")
     p.add_argument("--model", default=None,
                    help="path to hand_landmarker.task (default: auto-download "
                         "next to this script)")

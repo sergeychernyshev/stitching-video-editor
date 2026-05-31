@@ -15,6 +15,11 @@ Usage:
     python cut_video.py input.hands.json output.mp4
     python cut_video.py input.hands.json output.mp4 --no-audio
     python cut_video.py input.hands.json output.mp4 --crf 18 --preset slow
+    python cut_video.py input.hands.json output.mp4 --pad 3   # trim hands harder
+    python cut_video.py input.hands.json output.mp4 --pad -3  # keep more in/out
+
+--pad grows (positive) or shrinks (negative) each cut-out segment at cut time,
+so you can re-tune the edges without re-running detection.
 """
 
 import argparse
@@ -49,6 +54,75 @@ def build_select_expr(segments):
     return "+".join(f"between(n,{s},{e})" for s, e in segments)
 
 
+def segments_to_flags(segments, n):
+    """Boolean list of length n, True for frames inside any [start, end] run."""
+    flags = [False] * n
+    for s, e in segments:
+        for i in range(max(0, s), min(n, e + 1)):
+            flags[i] = True
+    return flags
+
+
+def adjust_flags(flags, pad):
+    """Grow (pad>0) or shrink (pad<0) the True (cut-out) regions by |pad| frames.
+
+    Positive `pad` dilates each cut-out segment outward: frames within `pad` of
+    a hand frame are also dropped, so undetected "semi-frames" where a hand is
+    entering or leaving get cut too.
+
+    Negative `pad` erodes each cut-out segment inward: a frame stays dropped
+    only if every frame within `|pad|` of it was also a hand frame, so the
+    borderline in/out frames are kept instead.
+    """
+    n = len(flags)
+    if pad == 0 or n == 0:
+        return list(flags)
+
+    r = abs(pad)
+    out = [False] * n
+    if pad > 0:
+        for i, f in enumerate(flags):
+            if f:
+                for j in range(max(0, i - r), min(n, i + r + 1)):
+                    out[j] = True
+    else:
+        for i, f in enumerate(flags):
+            if f:
+                lo, hi = max(0, i - r), min(n, i + r + 1)
+                if all(flags[j] for j in range(lo, hi)):
+                    out[i] = True
+    return out
+
+
+def flags_to_keep_segments(drop):
+    """Inclusive [start, end] runs of frames where `drop` is False."""
+    keep = []
+    n = len(drop)
+    i = 0
+    while i < n:
+        if not drop[i]:
+            j = i
+            while j < n and not drop[j]:
+                j += 1
+            keep.append([i, j - 1])
+            i = j
+        else:
+            i += 1
+    return keep
+
+
+def apply_pad(keep, n, pad):
+    """Return keep segments after growing/shrinking the cut-out gaps by `pad`.
+
+    Works from the kept segments alone: the cut-out (hand) frames are their
+    complement over [0, n), so this stays correct even if metadata is edited.
+    """
+    keep_flags = segments_to_flags(keep, n)
+    drop = [not k for k in keep_flags]
+    drop = adjust_flags(drop, pad)
+    return flags_to_keep_segments(drop)
+
+
 def cut(args):
     if not have_ffmpeg():
         sys.exit("error: ffmpeg not found on PATH. Install ffmpeg first.")
@@ -64,6 +138,18 @@ def cut(args):
     if not keep:
         sys.exit("error: no keep_segments in metadata - nothing to write "
                  "(every frame had a hand?).")
+
+    if args.pad:
+        n = meta.get("frame_count") or 0
+        if not n:
+            for s, e in keep:
+                n = max(n, e + 1)
+        keep = apply_pad(keep, n, args.pad)
+        if not keep:
+            sys.exit("error: --pad removed every frame - nothing to write. "
+                     "Try a smaller value.")
+
+    frames_kept = sum(e - s + 1 for s, e in keep)
 
     vexpr = build_select_expr(keep)
 
@@ -102,7 +188,7 @@ def cut(args):
         sys.exit(f"error: ffmpeg exited with code {result.returncode}")
 
     print(f"wrote: {args.output} "
-          f"({meta.get('frames_kept', '?')} of "
+          f"({frames_kept} of "
           f"{meta.get('frame_count', '?')} frames kept)")
 
 
@@ -115,6 +201,11 @@ def main():
                    help="output video file (default: output.mp4)")
     p.add_argument("--input", default=None,
                    help="source video (default: the path recorded in metadata)")
+    p.add_argument("--pad", type=int, default=0,
+                   help="grow (positive) or shrink (negative) each cut-out "
+                        "(hand) segment by N frames on each side. Positive "
+                        "hides undetected in/out frames near hands; negative "
+                        "reveals more frames going in and out (default: 0)")
     p.add_argument("--no-audio", action="store_true",
                    help="drop audio entirely")
     p.add_argument("--vcodec", default="libx264", help="video codec (default: libx264)")
